@@ -23,3 +23,9 @@ This includes new accounts and the removal of deleted accounts.
 It includes exceptions for objects which should not have the fine grained password policy applied to them.
 
 It applies to user accounts that are found in child OUs within those AD locations.
+
+## Implementation Details
+
+- Server or Service running automation:  PRVADCN105W.ewcn.ewbc.net
+- Permissions:  Runs as the SYSTEM account on PRVADCN105W
+- Schedule: Runs daily at 6am PT
