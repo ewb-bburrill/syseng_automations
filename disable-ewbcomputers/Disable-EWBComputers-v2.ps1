@@ -17,7 +17,7 @@ param(
 )
 # Constants
 $domain_name_pattern = '^(?=.{1,255}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$'
-
+$output_filename = "Disabled_EWB_Computers_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
 
 function Test-Domain{
     param (
@@ -56,6 +56,51 @@ function Get-OUPath {
 
     return $OUPath
 }
+
+function Unprotect-ADObjectIfProtected {
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    param(
+        [Parameter(Mandatory=$true, Position=0)]
+        [string]$DeviceFullOUPath,    # expected: distinguishedName (e.g. "CN=PC01,OU=Computers,DC=contoso,DC=com")
+        [switch]$Force                # suppress confirmation when present
+    )
+
+    process {
+        # Try to resolve the object by DN; fall back to Get-ADComputer if needed
+        try {
+            $obj = Get-ADObject -Identity $DeviceFullOUPath -Properties ProtectedFromAccidentalDeletion -ErrorAction Stop
+        } catch {
+            try {
+                $obj = Get-ADComputer -Identity $DeviceFullOUPath -Properties ProtectedFromAccidentalDeletion -ErrorAction Stop
+            } catch {
+                Write-Error "AD object not found: $DeviceFullOUPath"
+                return
+            }
+        }
+
+        $dn = $obj.DistinguishedName
+        $isProtected = [bool]$obj.ProtectedFromAccidentalDeletion
+
+        if ($isProtected) {
+            Write-Verbose "Object $dn is protected from accidental deletion."
+
+            if ($PSCmdlet.ShouldProcess($dn, 'Clear ProtectFromAccidentalDeletion')) {
+                # Use -Confirm:$false when -Force supplied, otherwise respect confirmations.
+                $confirmSwitch = if ($Force) { $false } else { $true }
+
+                try {
+                    Set-ADObject -Identity $dn -ProtectedFromAccidentalDeletion:$false -Confirm:$confirmSwitch -ErrorAction Stop
+                    Write-Output "Protection cleared for $dn"
+                } catch {
+                    Write-Error "Failed to clear protection for $dn : $($_.Exception.Message)"
+                }
+            }
+        } else {
+            Write-Verbose "AD Object not protected: $dn"
+        }
+    }
+}
+
 
 function Write-ResultsAsTableToEventLog {
     [CmdletBinding()]
@@ -147,41 +192,57 @@ if ($TestOnly) {
     $whatifFlag = "-WhatIf"
 }
 
-$result = @()
+$results = [System.Collections.ArrayList]::new()
 foreach ($computer in $computers) {
 
     Write-Verbose "Processing Object: $($computer.ComputerName)" 
     Write-Verbose "Full OU Path: $($computer.deviceFullOUPath)"
     Write-Verbose "Days Since Last Logon: $($computer.DaysSincePasswordLastSet)"
-    try {
-        $command = "Disable-ADAccount -Identity `"$($computer.deviceFullOUPath.ToString())`" -Server $DC $whatifFlag"
-        Write-Verbose "Executing command: $command"
-        Invoke-Expression $command
-        Write-Output "Disabled computer account: $($computer.ComputerName)"
-        $result += [PSCustomObject]@{
-            ComputerName = $computer.ComputerName
-            OperatingSystem = $computer.operatingSystem 
-            PasswordLastSet = $computer.PasswordLastSet
-            DaysSincePasswordLastSet = $computer.daysSincePasswordLastSet
-            deviceEnabled = $computer.Enabled
-            deviceFullOUPath = $computer.DistinguishedName
-            Owner = $computer.DistinguishedName
+    $command = "Disable-ADAccount -Identity `"$($computer.deviceFullOUPath.ToString())`" -Server $DC $whatifFlag"
+    Write-Verbose "Executing command: $command"
+    $result = [PSCustomObject]@{
+        ComputerName = $computer.ComputerName
+        Domain = $domain
+        OperatingSystem = $computer.operatingSystem 
+        PasswordLastSet = $computer.PasswordLastSet
+        DaysSincePasswordLastSet = $computer.daysSincePasswordLastSet
+        deviceEnabled = $computer.deviceEnabled
+        deviceFullOUPath = $computer.deviceFullOUPath
+        Owner = $computer.Owner
+        Whatif = $whatifFlag
+        Result = $null
         }
-    } catch {
-        Write-Warning "Failed to disable computer account: $($computer.ComputerName). Error: $($_.Exception.Message)"
+    if ($computer.deviceEnabled -eq "TRUE"){
+        try {
+            $command = "Disable-ADAccount -Identity `"$($computer.deviceFullOUPath.ToString())`" -Server $DC $whatifFlag"
+            Write-Verbose "Executing command: $command"
+            Invoke-Expression $command
+            Write-Output "Disabled computer account: $($computer.ComputerName)"
+            $result.deviceEnabled = "FALSE"
+        } catch {
+            $result.Result = "Failed to disable computer account: $($computer.ComputerName). Error: $($_.Exception.Message)"
+            Write-Warning $result.Result
+        }
     }
 
     try {
+        Unprotect-ADObjectIfProtected $computer.deviceFullOUPath -Force
         $command = "Move-ADObject -Identity `"$($computer.deviceFullOUPath.ToString())`" -TargetPath `"$OUPath`" -Server $DC $whatifFlag"
         Write-Verbose "Executing command: $command"
         Invoke-Expression $command
        
         Write-Output "Moved computer account: $($computer.ComputerName) to $OUPath"
     } catch {
-        Write-Warning "Failed to move computer account: $($computer.ComputerName). Error: $($_.Exception.Message)"
+        $result.Result = "Failed to move computer account: $($computer.ComputerName). Error: $($_.Exception.Message)"
+        Write-Warning $result.Result        
     }
-
+    $results.Add($result)
 }
 
-Write-ResultsAsTableToEventLog -Results $result -Source "EWB Inactive Computers Script" -LogName "Application" -EntryType Information -EventId 3001 -TableWidth 200 -Properties @('ComputerName','OperatingSystem','PasswordLastSet','DaysSincePasswordLastSet','deviceEnabled','deviceFullOUPath','Owner')
-$result | Export-Csv -Path .\$output_filename -NoTypeInformation -Force
+if (@($results).Count -eq 0) {
+    Write-Output "No results"
+} else {
+    Write-ResultsAsTableToEventLog -Results $results -Source "EWB Inactive Computers Scripts" -LogName "Application" -EntryType Information -EventId 3001 -TableWidth 200 -Properties @('ComputerName','OperatingSystem','PasswordLastSet','DaysSincePasswordLastSet','deviceEnabled','deviceFullOUPath','Owner')
+    $results | Export-Csv -Path .\$output_filename -NoTypeInformation -Force
+    Write-Output "Results written to the Event Log and to $output_filename"
+}

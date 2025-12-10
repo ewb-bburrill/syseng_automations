@@ -159,6 +159,7 @@ $DC = [string](Get-ADDomainController -DomainName $domain -Discover).HostName
 #Create the output filename
 $output_filename = Get-OutputFile -domain $domain
 
+# OUtput the parameters being used
 Write-Output "Domain to be queried: $domain"
 Write-Output "OU to be queried: $OU"
 Write-Output "DC to be queried: $DC"
@@ -169,7 +170,7 @@ $result = Get-DomainInactiveComputers -OU $OU -DC $DC -TimePeriodDays $TimePerio
 
 # Return the results
 #$result | ConvertTo-Json
-$result.Length
+Write-Output "Number of inactive computer objects found: $($result.Length)"
 
 
 # Clean up the results and add owners data
@@ -196,12 +197,16 @@ foreach ($object in $result){
         Write-Warning $warning_update
     }
 
-    $verbose_update = $object.ComputerName + " is owned by " + $object.Owner 
-    Write-Verbose $verbose_update
+    Write-Verbose "$($object.ComputerName) is owned by $($object.Owner) "
 }
 
 
 
 # Output the results to the event log and to a CSV file
-Write-ResultsAsTableToEventLog -Results $result -Source "EWB Inactive Computers Script" -LogName "Application" -EntryType Information -EventId 3001 -TableWidth 200 -Properties @('ComputerName','OperatingSystem','PasswordLastSet','DaysSincePasswordLastSet','deviceEnabled','deviceFullOUPath','Owner')
-$result | Export-Csv -Path .\$output_filename -NoTypeInformation -Force
+if (@($result).Count -eq 0) {
+    Write-Output "No results"
+} else {
+    Write-ResultsAsTableToEventLog -Results $result -Source "EWB Inactive Computers Script" -LogName "Application" -EntryType Information -EventId 3001 -TableWidth 200 -Properties @('ComputerName','OperatingSystem','PasswordLastSet','DaysSincePasswordLastSet','deviceEnabled','deviceFullOUPath','Owner')
+    $result | Export-Csv -Path .\$output_filename -NoTypeInformation -Force
+    Write-Output "Results written to the Event Log and to $output_filename"
+}
